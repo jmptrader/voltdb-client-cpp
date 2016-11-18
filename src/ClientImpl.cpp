@@ -233,6 +233,11 @@ static void regularEventCallback(struct bufferevent *bev, short events, void *ct
     impl->regularEventCallback(bev, events);
 }
 
+
+static void scanForTimeout(evutil_socket_t, short, void *ctx) {
+    ClientImpl *impl = reinterpret_cast<ClientImpl*>(ctx);
+    impl->purgeExpiredRequests();
+}
 /**
    type definition for the read or write callback.
 
@@ -287,7 +292,7 @@ const int64_t ClientImpl::VOLT_NOTIFICATION_MAGIC_NUMBER(9223372036854775806);
 const std::string ClientImpl::SERVICE("database");
 
 ClientImpl::ClientImpl(ClientConfig config) throw(voltdb::Exception, voltdb::LibEventException) :
-        m_base(NULL), m_ev(NULL), m_cfg(NULL), m_nextRequestId(INT64_MIN), m_nextConnectionIndex(0),
+        m_base(NULL), m_timerBase(NULL), m_ev(NULL), m_cfg(NULL), m_nextRequestId(INT64_MIN), m_nextConnectionIndex(0),
         m_listener(config.m_listener), m_invocationBlockedOnBackpressure(false),
         m_backPressuredForOutstandingRequests(false), m_loopBreakRequested(false),
         m_isDraining(false), m_instanceIdIsSet(false), m_outstandingRequests(0), m_leaderAddress(-1),
@@ -310,6 +315,9 @@ ClientImpl::ClientImpl(ClientConfig config) throw(voltdb::Exception, voltdb::Lib
     event_config_set_flag(m_cfg, EVENT_BASE_FLAG_NO_CACHE_TIME);//, EVENT_BASE_FLAG_NOLOCK);
     m_base = event_base_new_with_config(m_cfg);
     assert(m_base);
+    // cached time during event call will be good enough
+    m_timerBase = event_base_new();
+    assert(m_timerBase);
     if (m_base == NULL) {
         throw voltdb::LibEventException();
     }
@@ -587,10 +595,13 @@ static void reconnectCallback(evutil_socket_t fd, short events, void *clientData
 }
 
 void ClientImpl::reconnectEventCallback() {
-    if (m_pendingConnectionSize.load(boost::memory_order_consume) <= 0)  return;
+    if (m_pendingConnectionSize.load(boost::memory_order_consume) <= 0) {
+        return;
+    }
 
     boost::mutex::scoped_lock lock(m_pendingConnectionLock);
     const int64_t now = get_sec_time();
+
     BOOST_FOREACH( PendingConnectionSPtr& pc, m_pendingConnectionList ) {
         if ((now - pc->m_startPending) > RECONNECT_INTERVAL) {
             pc->m_startPending = now;
@@ -667,6 +678,7 @@ InvocationResponse ClientImpl::invoke(Procedure &proc) throw (voltdb::Exception,
     m_outstandingRequests++;
     (*m_callbacks[bev])[clientData] = callback;
 
+    //todo: set the timer expiration timer for read invocation
     if (event_base_dispatch(m_base) == -1) {
         throw voltdb::LibEventException();
     }
@@ -719,7 +731,116 @@ struct bufferevent *ClientImpl::routeProcedure(Procedure &proc, ScopedByteBuffer
     return NULL;
 }
 
+/* compares value first timestamp with second timestamp and returns 0 if equal, -1 if first is less thn second or
+ * 1 if first is greater
+ * @return: -1:
+ */
+int compareTimeVal(const struct timeval& first, const struct timeval& second) {
+    if (first.tv_sec < second.tv_sec) {
+        return -1;
+    }
+    if (first.tv_sec > second.tv_sec) {
+        return 1;
+    }
+    if (first.tv_usec < second.tv_usec) {
+        return -1;
+    }
+    return 0;
+}
 
+void ClientImpl::queueToTimeoutList(const Procedure &proc, struct bufferevent *bev, int64_t clientData) {
+    ProcedureInfo *procInfo = NULL;
+    try {
+        procInfo = m_distributer.getProcedure(proc.getName());
+    }
+    catch (const std::exception &excp) {
+        std::ostringstream os;
+        os << "Failed fetching the procedure information: " << excp.what();
+        if (m_pLogger) {
+            m_pLogger->log(ClientLogger::ERROR, os.str());
+            return;
+        }
+        std::cerr << os.str() << std::endl;
+    }
+    if (procInfo && procInfo->m_readOnly) {
+        struct timeval timeout;
+        int status = gettimeofday(&timeout, NULL);
+        assert(status);
+        timeout.tv_sec += m_queryTimeout.tv_sec;
+        timeout.tv_usec +=m_queryTimeout.tv_usec;
+        // todo: lock and perform the queue update below
+        boost::shared_ptr<InvocationTimeTracker> timeStampRequest (new InvocationTimeTracker(bev, clientData, timeout));
+        if (m_timeTrackerList.empty()) {
+            m_timeTrackerList.push_front(timeStampRequest);
+        } else {
+            // newest in front and oldest request  at tail of the list
+            std::list<boost::shared_ptr<InvocationTimeTracker> >::iterator it = m_timeTrackerList.begin();
+            while(it != m_timeTrackerList.end()) {
+                if (compareTimeVal(timeStampRequest.get()->getExpirationTime(), it->get()->getExpirationTime()) <= 0) {
+                    ++it;
+                    continue;
+                }
+                break;
+            }
+            m_timeTrackerList.insert(++it, timeStampRequest);
+        }
+    }
+}
+
+void ClientImpl::purgeExpiredRequests() {
+    struct timeval now;
+    event_base_gettimeofday_cached(m_timerBase, &now);
+
+    if (!m_timeTrackerList.empty()) {
+        std::list<boost::shared_ptr<InvocationTimeTracker> >::reverse_iterator requestsFifoIter = m_timeTrackerList.rbegin();
+
+        boost::shared_ptr<CallbackMap> callbackMap;
+        BEVToCallbackMap::iterator bevToCallbackIter;
+        CallbackMap::iterator callbackmapIter;
+        std::vector<voltdb::Table> dummyTable;
+        InvocationResponse response = InvocationResponse(0, voltdb::STATUS_CODE_CONNECTION_TIMEOUT, "",
+                voltdb::STATUS_CODE_UNINITIALIZED_APP_STATUS_CODE, "No response received in allotted time",
+                dummyTable);
+
+        // clean up as many requests, using time as priority, which have been serviced
+        while ((requestsFifoIter != m_timeTrackerList.rend()) &&
+                (compareTimeVal(requestsFifoIter->get()->getExpirationTime(), now) <= 0)) {
+            // cleanup callback for timed out request
+            struct bufferevent *bev = requestsFifoIter->get()->getBEV();
+            int64_t clientData = requestsFifoIter->get()->getClientData();
+            // connection lost
+            bevToCallbackIter = m_callbacks.find(bev);
+            if (bevToCallbackIter != m_callbacks.end()) {
+                callbackMap = bevToCallbackIter->second;
+                callbackmapIter = callbackMap->find(clientData);
+                if (callbackmapIter != callbackMap->end()) {
+                    response.setClientData(clientData);
+                    try {
+                        callbackmapIter->second->callback(response);
+                    } catch (std::exception &excp) {
+                        if (m_listener.get() != NULL) {
+                            try {
+                                m_listener->uncaughtException(excp, callbackmapIter->second, response);
+                            } catch (std::exception &e) {
+                                std::ostringstream msg;
+                                msg << "Uncaught exception. " << e.what();
+                                logMessage(ClientLogger::ERROR, msg.str());
+                            }
+                        }
+                    }
+
+                }
+                callbackMap->erase(callbackmapIter);
+                --m_outstandingRequests;
+            }
+            // purge entry from tracking list
+            ++requestsFifoIter;
+            requestsFifoIter =
+                    std::list<boost::shared_ptr<InvocationTimeTracker> >::reverse_iterator (m_timeTrackerList.erase(requestsFifoIter.base()));
+        }
+        //todo: scan n elements to see if they have serviced. if so, remove them
+    }
+}
 void ClientImpl::invoke(Procedure &proc, boost::shared_ptr<ProcedureCallback> callback) throw (voltdb::Exception,
                                                                                                voltdb::NoConnectionsException,
                                                                                                voltdb::UninitializedParamsException,
@@ -853,6 +974,8 @@ void ClientImpl::invoke(Procedure &proc, boost::shared_ptr<ProcedureCallback> ca
     }
     m_outstandingRequests++;
     (*m_callbacks[bev])[clientData] = callback;
+    queueToTimeoutList(proc, bev, clientData);
+
 
     if (evbuffer_get_length(evbuf) >  262144) {
         m_backpressuredBevs.insert(bev);
@@ -1191,7 +1314,7 @@ public:
 
     bool allowAbandon() const {return false;}
 
- private:
+private:
     Distributer *m_dist;
     ClientLogger *m_logger;
 };

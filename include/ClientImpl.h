@@ -36,6 +36,7 @@
 #include <boost/atomic.hpp>
 #include <boost/shared_ptr.hpp>
 #include <boost/thread/mutex.hpp>
+#include <boost/container/vector.hpp>
 #include "ClientConfig.h"
 #include "Distributer.h"
 namespace voltdb {
@@ -44,6 +45,22 @@ class CxnContext;
 class MockVoltDB;
 class Client;
 class PendingConnection;
+
+
+class TimevalCompare {
+    bool operator() (const struct timeval &lhs, const struct timeval &rhs) {
+        if (lhs.tv_sec < rhs.tv_sec) {
+            return true;
+        }
+        if (lhs.tv_sec > rhs.tv_sec) {
+            return false;
+        }
+        if (lhs.tv_usec < rhs.tv_usec) {
+            return true;
+        }
+        return false;
+    }
+};
 
 class ClientImpl {
     friend class MockVoltDB;
@@ -61,7 +78,6 @@ public:
      * Map from buffer event (connection) to the connection's callback map
      */
     typedef std::map< struct bufferevent*, boost::shared_ptr<CallbackMap> > BEVToCallbackMap;
-
 
     /*
      * Create a connection to the VoltDB process running at the specified host authenticating
@@ -99,6 +115,8 @@ public:
     void regularWriteCallback(struct bufferevent *bev);
     void eventBaseLoopBreak();
     void reconnectEventCallback();
+
+    void purgeExpiredRequests();
 
     /*
      * If one of the run family of methods is running on another thread, this
@@ -171,9 +189,14 @@ private:
      */
     void logMessage(ClientLogger::CLIENT_LOG_LEVEL severity, const std::string& msg);
 
+    // function to update requests for tracking timeouts using current time
+    void queueToTimeoutList(const Procedure &proc, struct bufferevent *bev, int64_t clientData);
+
     Distributer  m_distributer;
     struct event_base *m_base;
-    struct event * m_ev;
+    struct event_base *m_timerBase;
+    struct event *m_ev;
+    //struct event *m_timerEvent;
     struct event_config * m_cfg;
     int64_t m_nextRequestId;
     size_t m_nextConnectionIndex;
@@ -215,6 +238,26 @@ private:
     ClientAuthHashScheme m_hashScheme;
     static const int64_t VOLT_NOTIFICATION_MAGIC_NUMBER;
     static const std::string SERVICE;
+
+    class InvocationTimeTracker {
+    public:
+        InvocationTimeTracker(struct bufferevent *bev,
+                int64_t clientData,
+                const struct timeval &expirationTime) : m_bev(bev),
+                        m_clientData(clientData) {
+            ::memcpy(&m_expirationTime, &expirationTime, sizeof(struct timeval));
+        }
+        struct bufferevent* getBEV() { return m_bev; }
+        int64_t getClientData() const { return m_clientData; }
+        const struct timeval& getExpirationTime() const { return m_expirationTime; }
+    private:
+        struct bufferevent *m_bev;
+        int64_t m_clientData;
+        struct timeval m_expirationTime;
+    };
+
+    std::list<boost::shared_ptr<InvocationTimeTracker> > m_timeTrackerList;
+    struct timeval m_queryTimeout;
 };
 }
 #endif /* VOLTDB_CLIENTIMPL_H_ */

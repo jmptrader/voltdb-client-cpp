@@ -258,10 +258,17 @@ public:
  * to tell what happened.
  */
 class LibEventException : public voltdb::Exception {
+    std::string m_what;
 public:
-    LibEventException() : Exception() {}
+    explicit LibEventException() : Exception() {
+        m_what = "Lib event generated an unexpected error";
+    }
+    explicit LibEventException(const std::string& msg) : Exception() {
+        m_what = "Lib event generated an unexpected error: " + msg;
+    }
+    virtual ~LibEventException() throw() {}
     virtual const char* what() const throw() {
-        return "Lib event generated an unexpected error";
+        return m_what.c_str();
     }
 };
 
@@ -299,6 +306,19 @@ public:
     }
     virtual ~CoordinateOutOfRangeException() throw() {}
     virtual const char* what() const throw() {
+        return m_what.c_str();
+    }
+};
+
+class PipeCreationException : public voltdb::Exception {
+    std::string m_what;
+public:
+    explicit PipeCreationException() : Exception() {
+        m_what = "Failed to create pipe";
+    }
+    virtual ~PipeCreationException() throw() {}
+
+    virtual  const char* what() const throw() {
         return m_what.c_str();
     }
 };

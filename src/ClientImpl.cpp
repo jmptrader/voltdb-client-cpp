@@ -180,6 +180,10 @@ static void authenticationReadCallback(struct bufferevent *bev, void *ctx) {
 static void authenticationEventCallback(struct bufferevent *bev, short events, void *ctx) {
     PendingConnection *pc = reinterpret_cast<PendingConnection*>(ctx);
 
+    if(events & BEV_EVENT_TIMEOUT) {
+        std::cout << "got timed out" << (int) events <<std::endl;
+    }
+
     if (events & BEV_EVENT_CONNECTED) {
         pc->initiateAuthentication(bev);
     } else if (events & (BEV_EVENT_ERROR | BEV_EVENT_EOF | BEV_EVENT_TIMEOUT)) {
@@ -225,6 +229,25 @@ void wakeupPipeCallback(evutil_socket_t fd, short what, void *ctx) {
     impl->eventBaseLoopBreak();
 }
 
+static void wakeUpTimerCallback(evutil_socket_t fd, short event, void *ctx) {
+#if 0
+    int pipe = *(reinterpret_cast<int *> (ctx));
+    static unsigned char c = 'w';
+    write(pipe, &c, 1);
+#endif
+
+    std::cout << "wakeUpTimerCallback: trigger scan for timedout requests " << std::endl;
+    ClientImpl *impl = reinterpret_cast<ClientImpl*>(ctx);
+    impl->triggerScanForTimeoutRequestsEvent();
+}
+
+static void handleScanForTimedoutRequestsCB(evutil_socket_t fd, short event, void *ctx) {
+    ClientImpl *impl = reinterpret_cast<ClientImpl*>(ctx);
+    char buf[64];
+    (void)read(fd, buf, sizeof buf);
+    std::cout << "got ping to scan for timedout requests " << std::endl;
+    //todo: enable me impl->purgeTimedoutRequests();
+}
 /*
  * Only has to handle the case where there is an error or EOF
  */
@@ -233,11 +256,6 @@ static void regularEventCallback(struct bufferevent *bev, short events, void *ct
     impl->regularEventCallback(bev, events);
 }
 
-
-static void scanForTimeout(evutil_socket_t, short, void *ctx) {
-    ClientImpl *impl = reinterpret_cast<ClientImpl*>(ctx);
-    impl->purgeExpiredRequests();
-}
 /**
    type definition for the read or write callback.
 
@@ -272,11 +290,33 @@ ClientImpl::~ClientImpl() {
     if (m_ev != NULL) {
         event_free(m_ev);
     }
-    event_base_free(m_base);
+
     if (m_wakeupPipe[1] != -1) {
        ::close(m_wakeupPipe[0]);
        ::close(m_wakeupPipe[1]);
     }
+
+    if (m_timerEventInitialized) {
+        // cancel and free any timer events
+        if (m_timerEventPtr) {
+            if (evtimer_pending(m_timerEventPtr, NULL)) {
+                evtimer_del(m_timerEventPtr);
+            }
+            event_free(m_timerEventPtr);
+        }
+        // free up rest of timer management trackers
+        if (m_timeoutServiceEventPtr) {
+            event_free(m_timeoutServiceEventPtr);
+        }
+        if (m_timerBase) {
+            event_base_free(m_timerBase);
+        }
+        ::close(m_timerCheckPipe[0]);
+        ::close(m_timerCheckPipe[1]);
+        m_timerEventInitialized = false;
+    }
+
+    event_base_free(m_base);
 }
 
 // Initialization for the library that only gets called once
@@ -292,12 +332,13 @@ const int64_t ClientImpl::VOLT_NOTIFICATION_MAGIC_NUMBER(9223372036854775806);
 const std::string ClientImpl::SERVICE("database");
 
 ClientImpl::ClientImpl(ClientConfig config) throw(voltdb::Exception, voltdb::LibEventException) :
-        m_base(NULL), m_timerBase(NULL), m_ev(NULL), m_cfg(NULL), m_nextRequestId(INT64_MIN), m_nextConnectionIndex(0),
+        m_base(NULL), m_ev(NULL), m_cfg(NULL), m_nextRequestId(INT64_MIN), m_nextConnectionIndex(0),
         m_listener(config.m_listener), m_invocationBlockedOnBackpressure(false),
         m_backPressuredForOutstandingRequests(false), m_loopBreakRequested(false),
         m_isDraining(false), m_instanceIdIsSet(false), m_outstandingRequests(0), m_leaderAddress(-1),
         m_clusterStartTime(-1), m_username(config.m_username), m_maxOutstandingRequests(config.m_maxOutstandingRequests),
-        m_ignoreBackpressure(false), m_useClientAffinity(false),m_updateHashinator(false), m_pendingConnectionSize(0),
+        m_ignoreBackpressure(false), m_useClientAffinity(true),m_updateHashinator(false), m_pendingConnectionSize(0),
+        m_timerBase(NULL), m_timerEventPtr(NULL), m_timeoutServiceEventPtr(NULL), m_timerEventInitialized(false),
         m_pLogger(0)
 {
 
@@ -315,12 +356,17 @@ ClientImpl::ClientImpl(ClientConfig config) throw(voltdb::Exception, voltdb::Lib
     event_config_set_flag(m_cfg, EVENT_BASE_FLAG_NO_CACHE_TIME);//, EVENT_BASE_FLAG_NOLOCK);
     m_base = event_base_new_with_config(m_cfg);
     assert(m_base);
-    // cached time during event call will be good enough
-    m_timerBase = event_base_new();
-    assert(m_timerBase);
     if (m_base == NULL) {
         throw voltdb::LibEventException();
     }
+
+    // cached time during event call will be good enough
+    m_timerBase = event_base_new();
+    assert(m_timerBase);
+    if (m_timerBase == NULL) {
+        throw voltdb::LibEventException();
+    }
+
     m_enableAbandon = config.m_enableAbandon;
     m_hashScheme = config.m_hashScheme;
     if (m_hashScheme == HASH_SHA1) {
@@ -338,6 +384,12 @@ ClientImpl::ClientImpl(ClientConfig config) throw(voltdb::Exception, voltdb::Lib
 
     m_wakeupPipe[0] = -1;
     m_wakeupPipe[1] = -1;
+
+    m_timerCheckPipe[0] = -1;
+    m_timerCheckPipe[1] = -1;
+
+    m_queryTimeout.tv_sec = 10;
+    m_queryTimeout.tv_usec = 0;
 }
 
 class FreeBEVOnFailure {
@@ -414,6 +466,9 @@ void ClientImpl::close() {
        ::close(m_wakeupPipe[0]);
        ::close(m_wakeupPipe[1]);
     }
+
+    // not closing timer intentionally at present. currently cleaned up in destructor only
+
     if (m_bevs.empty()) return;
     for (std::vector<struct bufferevent *>::iterator i = m_bevs.begin(); i != m_bevs.end(); ++i) {
         int fd = bufferevent_getfd(*i);
@@ -566,11 +621,42 @@ void ClientImpl::createConnection(const std::string& hostname,
     } else {
         m_wakeupPipe[1] = -1;
     }
+
     PendingConnectionSPtr pc(new PendingConnection(hostname, port, keepConnecting, m_base, this));
     initiateConnection(pc);
 
+    std::cout << "initiated connection" << std::endl;
     if (event_base_dispatch(m_base) == -1) {
         throw voltdb::LibEventException();
+    }
+
+    int status = 0;
+    if ((m_timerEventInitialized == false) && ((status = pipe(m_timerCheckPipe)) == 0)) {
+        m_timerEventPtr = evtimer_new(m_timerBase, wakeUpTimerCallback, this);
+        if (m_timerEventPtr == NULL) {
+            throw LibEventException("evtimer_new failed");
+        }
+        m_timeoutServiceEventPtr = event_new(m_base, m_timerCheckPipe[0], EV_READ | EV_PERSIST, handleScanForTimedoutRequestsCB, this);
+        if (m_timeoutServiceEventPtr == NULL) {
+            throw LibEventException();
+        }
+        if (evtimer_add(m_timerEventPtr, &m_queryTimeout) != 0) {
+            throw LibEventException("failed adding timeout event");
+        } else {
+            std::cout << "added timer event event with timeout. secs: " << m_queryTimeout.tv_sec <<
+                    ", usec: " << m_queryTimeout.tv_usec << std::endl;
+        }
+
+        if (event_base_dispatch(m_timerBase) == -1) {
+            throw LibEventException("failed running timer event base");
+        }
+        else {
+            std::cout << "dispatched timer event: " << std::endl;
+        }
+        m_timerEventInitialized = true;
+    }
+    if (status != 0) {
+        throw PipeCreationException();
     }
 
     if (pc->m_status) {
@@ -587,6 +673,9 @@ void ClientImpl::createConnection(const std::string& hostname,
     } else {
         throw ConnectException();
     }
+
+
+
 }
 
 static void reconnectCallback(evutil_socket_t fd, short events, void *clientData) {
@@ -774,7 +863,7 @@ void ClientImpl::queueToTimeoutList(const Procedure &proc, struct bufferevent *b
             m_timeTrackerList.push_front(timeStampRequest);
         } else {
             // newest in front and oldest request  at tail of the list
-            std::list<boost::shared_ptr<InvocationTimeTracker> >::iterator it = m_timeTrackerList.begin();
+            std::deque<boost::shared_ptr<InvocationTimeTracker> >::iterator it = m_timeTrackerList.begin();
             while(it != m_timeTrackerList.end()) {
                 if (compareTimeVal(timeStampRequest.get()->getExpirationTime(), it->get()->getExpirationTime()) <= 0) {
                     ++it;
@@ -787,12 +876,12 @@ void ClientImpl::queueToTimeoutList(const Procedure &proc, struct bufferevent *b
     }
 }
 
-void ClientImpl::purgeExpiredRequests() {
+void ClientImpl::purgeTimedoutRequests() {
     struct timeval now;
     event_base_gettimeofday_cached(m_timerBase, &now);
 
     if (!m_timeTrackerList.empty()) {
-        std::list<boost::shared_ptr<InvocationTimeTracker> >::reverse_iterator requestsFifoIter = m_timeTrackerList.rbegin();
+        std::deque<boost::shared_ptr<InvocationTimeTracker> >::reverse_iterator requestsFifoIter = m_timeTrackerList.rbegin();
 
         boost::shared_ptr<CallbackMap> callbackMap;
         BEVToCallbackMap::iterator bevToCallbackIter;
@@ -836,7 +925,7 @@ void ClientImpl::purgeExpiredRequests() {
             // purge entry from tracking list
             ++requestsFifoIter;
             requestsFifoIter =
-                    std::list<boost::shared_ptr<InvocationTimeTracker> >::reverse_iterator (m_timeTrackerList.erase(requestsFifoIter.base()));
+                    std::deque<boost::shared_ptr<InvocationTimeTracker> >::reverse_iterator (m_timeTrackerList.erase(requestsFifoIter.base()));
         }
         //todo: scan n elements to see if they have serviced. if so, remove them
     }
@@ -1382,6 +1471,12 @@ void ClientImpl::logMessage(ClientLogger::CLIENT_LOG_LEVEL severity, const std::
     if( m_pLogger ){
         m_pLogger->log(severity, msg);
     }
+}
+
+void ClientImpl::triggerScanForTimeoutRequestsEvent() {
+    static unsigned char c = 'w';
+    write(m_timerCheckPipe[1], &c, 1);
+    evtimer_add(m_timerEventPtr, &m_queryTimeout);
 }
 
 }

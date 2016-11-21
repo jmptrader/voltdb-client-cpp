@@ -61,7 +61,12 @@ public:
      * @throws voltdb::ConnectException An error occurs connecting or authenticating
      * @throws voltdb::LibEventException libevent returns an error code
      */
-    void createConnection(const std::string &hostname, const unsigned short port, const bool keepConnecting) throw (voltdb::Exception, voltdb::ConnectException, voltdb::LibEventException);
+    void createConnection(const std::string &hostname, const unsigned short port, const bool keepConnecting)
+                throw (voltdb::Exception,
+                       voltdb::ConnectException,
+                       voltdb::LibEventException,
+                       voltdb::PipeCreationException,
+                       voltdb::TimerThreadException);
 
     /*
      * Synchronously invoke a stored procedure and return a the response.
@@ -90,6 +95,7 @@ public:
     void eventBaseLoopBreak();
     void reconnectEventCallback();
 
+    void startTimer() throw (voltdb::LibEventException);
     void purgeTimedoutRequests();
     void triggerScanForTimeoutRequestsEvent();
 
@@ -164,6 +170,8 @@ private:
      */
     void logMessage(ClientLogger::CLIENT_LOG_LEVEL severity, const std::string& msg);
 
+    void setUpTimeTracking() throw (voltdb::LibEventException);
+    void startTimerThread() throw (voltdb::TimerThreadException);
     // function to update requests for tracking timeouts using current time
     void queueToTimeoutList(const Procedure &proc, struct bufferevent *bev, int64_t clientData);
 
@@ -245,6 +253,7 @@ private:
     int m_wakeupPipe[2];
     boost::mutex m_wakeupPipeLock;
 
+    pthread_t m_timerThread;
     struct event_base *m_timerBase;
     struct event *m_timerEventPtr;
     struct event *m_timeoutServiceEventPtr;

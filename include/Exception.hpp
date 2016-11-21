@@ -323,6 +323,23 @@ public:
     }
 };
 
+
+class TimerThreadException : public voltdb::Exception {
+private:
+    std::string m_msg;
+public:
+    explicit TimerThreadException() : Exception() {
+        m_msg = "Timer thread exception";
+    }
+    explicit TimerThreadException(std::string msg) {
+        m_msg = "Timer thread exception: " + msg;
+    }
+
+    virtual ~TimerThreadException() throw () {}
+
+    const char* what() const throw () { return m_msg.c_str();}
+};
+
 }
 
 #endif /* VOLTDB_EXCEPTION_HPP_ */

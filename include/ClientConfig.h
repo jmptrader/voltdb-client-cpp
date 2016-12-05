@@ -36,23 +36,27 @@ public:
     ClientConfig(
             std::string username = std::string(""),
             std::string password = std::string(""),
-            ClientAuthHashScheme scheme = HASH_SHA1, bool enableAbandon = false);
+            ClientAuthHashScheme scheme = HASH_SHA1, bool enableAbandon = false,
+            bool useSSL = false);
     ClientConfig(
             std::string username,
             std::string password,
             boost::shared_ptr<StatusListener> listener,
-            ClientAuthHashScheme scheme = HASH_SHA1, bool enableAbandon = false);
+            ClientAuthHashScheme scheme = HASH_SHA1, bool enableAbandon = false,
+            bool useSSL = false);
     ClientConfig(
             std::string username,
             std::string password,
             StatusListener *listener,
-            ClientAuthHashScheme scheme = HASH_SHA1, bool enableAbandon = false);
+            ClientAuthHashScheme scheme = HASH_SHA1, bool enableAbandon = false,
+            bool useSSL = false);
     std::string m_username;
     std::string m_password;
     boost::shared_ptr<StatusListener> m_listener;
     int32_t m_maxOutstandingRequests;
     ClientAuthHashScheme m_hashScheme;
     bool m_enableAbandon;
+    bool m_useSSL;
 };
 }
 

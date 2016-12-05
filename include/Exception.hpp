@@ -303,6 +303,26 @@ public:
     }
 };
 
+
+class OpenSSLException : public voltdb::Exception {
+    std::string m_what;
+public:
+    explicit OpenSSLException() : Exception() {
+        m_what = "OpenSSL Exception";
+    }
+
+    explicit OpenSSLException(const std::string &msg) {
+        m_what = msg + " Open SSL Exception";
+    }
+
+    virtual ~OpenSSLException() throw() {
+    }
+
+    const char* what() const throw() {
+        return m_what.c_str();
+    }
+};
+
 }
 
 #endif /* VOLTDB_EXCEPTION_HPP_ */

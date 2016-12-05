@@ -42,16 +42,14 @@ public:
     }
     bool connectionLost(std::string hostname, int32_t connectionsLeft) {
         if (m_listener != NULL) {
-            bool retval = m_listener->connectionLost(hostname, connectionsLeft);
-            return retval;
+            return m_listener->connectionLost(hostname, connectionsLeft);
         } else {
             return false;
         }
     }
     bool connectionActive(std::string hostname, int32_t connectionsActive) {
         if (m_listener != NULL) {
-            bool retval = m_listener->connectionActive(hostname, connectionsActive);
-            return retval;
+            return m_listener->connectionActive(hostname, connectionsActive);
         } else {
             return false;
         }
@@ -67,23 +65,29 @@ public:
 
     ClientConfig::ClientConfig(
             std::string username,
-            std::string password, ClientAuthHashScheme scheme, bool enableAbandon) :
+            std::string password, ClientAuthHashScheme scheme, bool enableAbandon,
+            bool useSSL) :
             m_username(username), m_password(password), m_listener(reinterpret_cast<StatusListener*>(NULL)),
-            m_maxOutstandingRequests(3000), m_hashScheme(scheme), m_enableAbandon(enableAbandon) {
+            m_maxOutstandingRequests(3000), m_hashScheme(scheme), m_enableAbandon(enableAbandon),
+            m_useSSL (useSSL) {
     }
     ClientConfig::ClientConfig(
             std::string username,
             std::string password,
-            StatusListener *listener, ClientAuthHashScheme scheme, bool enableAbandon) :
+            StatusListener *listener, ClientAuthHashScheme scheme, bool enableAbandon,
+            bool useSSL) :
             m_username(username), m_password(password), m_listener(new DummyStatusListener(listener)),
-            m_maxOutstandingRequests(3000), m_hashScheme(scheme), m_enableAbandon(enableAbandon) {
+            m_maxOutstandingRequests(3000), m_hashScheme(scheme), m_enableAbandon(enableAbandon),
+            m_useSSL(useSSL) {
     }
     ClientConfig::ClientConfig(
             std::string username,
             std::string password,
-            boost::shared_ptr<StatusListener> listener, ClientAuthHashScheme scheme, bool enableAbandon) :
+            boost::shared_ptr<StatusListener> listener, ClientAuthHashScheme scheme, bool enableAbandon,
+            bool useSSL) :
                 m_username(username), m_password(password), m_listener(listener),
-                m_maxOutstandingRequests(3000), m_hashScheme(scheme), m_enableAbandon(enableAbandon) {
+                m_maxOutstandingRequests(3000), m_hashScheme(scheme), m_enableAbandon(enableAbandon),
+                m_useSSL(useSSL) {
     }
 }
 

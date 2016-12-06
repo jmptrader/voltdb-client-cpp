@@ -288,7 +288,7 @@ public:
     }
 };
 
-class CoordinateOutOfRangeException : public voltdb::Exception {
+class CoordinateOutOfRangeException : public Exception {
     std::string m_what;
 public:
     explicit CoordinateOutOfRangeException() : Exception() {
@@ -304,18 +304,18 @@ public:
 };
 
 
-class OpenSSLException : public voltdb::Exception {
+class SSLException : public Exception {
     std::string m_what;
 public:
-    explicit OpenSSLException() : Exception() {
+    explicit SSLException() : Exception() {
         m_what = "OpenSSL Exception";
     }
 
-    explicit OpenSSLException(const std::string &msg) {
-        m_what = msg + " Open SSL Exception";
+    explicit SSLException(const std::string& msg) {
+        m_what = "Open SSL Exception: " + msg;
     }
 
-    virtual ~OpenSSLException() throw() {
+    virtual ~SSLException() throw() {
     }
 
     const char* what() const throw() {

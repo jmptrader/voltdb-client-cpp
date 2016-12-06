@@ -76,7 +76,7 @@ public:
      * @throws voltdb::ConnectException An error occurs connecting or authenticating
      * @throws voltdb::LibEventException libevent returns an error code
      */
-    void createConnection(const std::string &hostname, const unsigned short port, const bool keepConnecting) throw (voltdb::Exception, voltdb::ConnectException, voltdb::LibEventException);
+    void createConnection(const std::string &hostname, const unsigned short port, const bool keepConnecting) throw (voltdb::Exception, voltdb::ConnectException, voltdb::LibEventException, SSLException);
 
     /*
      * Synchronously invoke a stored procedure and return a the response.
@@ -136,7 +136,7 @@ public:
     void setLoggerCallback(ClientLogger *pLogger) { m_pLogger = pLogger;}
 
 private:
-    ClientImpl(ClientConfig config) throw (voltdb::Exception, voltdb::LibEventException);
+    ClientImpl(ClientConfig config) throw (voltdb::Exception, voltdb::LibEventException, SSLException);
 
     void initiateAuthentication(struct bufferevent *bev) throw (voltdb::LibEventException);
     void finalizeAuthentication(PendingConnection* pc) throw (voltdb::Exception, voltdb::ConnectException);
@@ -159,7 +159,7 @@ private:
     /*
      * Initiate connection based on pending connection instance
      */
-    void initiateConnection(boost::shared_ptr<PendingConnection> &pc) throw (voltdb::ConnectException, voltdb::LibEventException);
+    void initiateConnection(boost::shared_ptr<PendingConnection> &pc) throw (voltdb::ConnectException, voltdb::LibEventException, SSLException);
 
     /*
      * Creates a pending connection that is handled in the reconnect callback
@@ -219,8 +219,7 @@ private:
     ClientLogger* m_pLogger;
     ClientAuthHashScheme m_hashScheme;
     bool m_useSSL;
-    SSL_CTX *m_ssl_ctx;
-    SSL *m_ssl;
+    SSL_CTX *m_clientSslCtx;
 
     static const int64_t VOLT_NOTIFICATION_MAGIC_NUMBER;
     static const std::string SERVICE;
